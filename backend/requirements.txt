@@ -7,5 +7,6 @@ boto3==1.37.18
 pypdf==5.3.1
 Pillow==12.3.0
 email-validator==2.2.0
+google-genai==1.28.0
 pytest==8.3.5
 httpx==0.28.1

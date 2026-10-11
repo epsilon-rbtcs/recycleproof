@@ -5,7 +5,7 @@ A runnable local MVP for explainable review of e-waste recycling claims. It prov
 ## Repository
 
 - `frontend/` — React, Vite, TypeScript, Tailwind interface.
-- `backend/app/` — FastAPI routes, SQLAlchemy models, real/demo auth, private storage and verification engine.
+- `backend/app/` — FastAPI routes, SQLAlchemy models, real/demo auth, private storage, Gemini document extraction and verification engine.
 - `backend/app/demo_data.py` and `demo_service.py` — deterministic fictional claims, source PDFs and session-scoped serializers.
 - `backend/seed_demo_assets.py` / `cleanup_demo_sessions.py` — idempotent seed and expired/revoked demo-session cleanup commands.
 - `backend/tests/` — pytest tests for authentication, demo isolation, verification, authorization, storage and uploads.
@@ -43,6 +43,24 @@ Real sign-in follows user ID + password, then a cryptographically random six-dig
 For Gmail: enable Google 2-Step Verification; create an **App Password** in Google Account security (use that 16-character app password, not the normal account password); set `SMTP_HOST=smtp.gmail.com`, `SMTP_PORT=587`, `SMTP_USERNAME` and `SMTP_FROM_EMAIL` to the Gmail address, `SMTP_PASSWORD` to the app password, and `SMTP_USE_TLS=true`; restart backend, then check `/api/health`. To test delivery, register with an inbox you control and sign in. Verify the message arrives and the emailed code works; the app does not claim delivery until SMTP succeeds.
 
 Local-only no-SMTP testing: set `APP_ENV=development` and explicitly `DEV_OTP_ENABLED=true`; then restart. The API includes `dev_otp` only for this opt-in non-production configuration and prints a local diagnostic. Do **not** enable this setting in a production environment. It is disabled by default.
+
+## Gemini document extraction
+
+The backend uses the official `google-genai` SDK to extract explicit, structured
+fields from uploaded invoices, shipment manifests and other accepted evidence. Set
+`GEMINI_API_KEY` in the ignored `backend/.env`; it is never read by the frontend or
+returned by an API response. The default model is `gemini-2.5-flash` and can be
+overridden with `GEMINI_MODEL` if the configured account uses another available
+Gemini model. `GEMINI_TIMEOUT_SECONDS` defaults to 30.
+
+Extraction is nullable and schema-validated: missing or uncertain fields remain
+missing. Uploads are retained when Gemini is unconfigured, times out, exhausts
+quota, returns an API error, or produces malformed data; their extraction status
+explains why manual field correction is needed. Before verification, only missing
+claim inputs are filled from typed extraction results. The existing deterministic
+verification engine remains authoritative for checks and findings, including
+document references and compared values. Automated findings are review signals,
+not proof of misconduct.
 
 ## S3
 

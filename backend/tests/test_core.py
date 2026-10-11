@@ -8,6 +8,7 @@ from fastapi.testclient import TestClient
 from app.main import app
 from app.security import hash_password,verify_password
 from app.verifier import normalize_kg,verify_claim
+from app.gemini_extractor import ExtractedDocumentFields, ExtractionResult, apply_extracted_fields
 
 client=TestClient(app)
 
@@ -23,6 +24,43 @@ def test_password_is_salted_and_verifies():
 def test_units_convert_and_unknown_is_not_guessed():
     assert normalize_kg(1,"tonne")==1000
     assert normalize_kg(1,"mystery") is None
+
+def test_gemini_fields_are_typed_and_do_not_fabricate():
+    fields = ExtractedDocumentFields.model_validate({
+        "document_id": "INV-42",
+        "organization": "Northwind Recycling",
+        "material_category": "circuit boards",
+        "quantity": 1250,
+        "unit": "kg",
+        "shipment_reference": "SHIP-42",
+        "confidence": 0.94,
+    })
+    assert fields.document_date is None
+    assert fields.quantity == 1250
+    assert ExtractedDocumentFields().model_dump(exclude_none=True) == {}
+
+def test_extracted_fields_fill_only_missing_claim_inputs():
+    shipment = SimpleNamespace(document_type="shipment_manifest", extracted_fields={
+        "quantity": 1250, "unit": "kg", "shipment_reference": "SHIP-42", "shipment_date": "2026-01-02"
+    })
+    invoice = SimpleNamespace(document_type="invoice", extracted_fields={
+        "invoice_reference": "INV-42", "document_date": "2026-01-01"
+    })
+    current = claim(shipment_quantity=None, shipment_ids=[], invoice_ids=[], details={})
+    apply_extracted_fields(current, [shipment, invoice])
+    assert current.shipment_quantity == 1250
+    assert current.shipment_ids == ["SHIP-42"]
+    assert current.invoice_ids == ["INV-42"]
+    assert current.details["event_dates"] == ["2026-01-02", "2026-01-01"]
+
+def test_extraction_failure_is_explicit():
+    result = ExtractionResult(
+        fields=ExtractedDocumentFields(),
+        status="API_ERROR",
+        message="Gemini extraction failed (TimeoutError).",
+    )
+    assert result.status == "API_ERROR"
+    assert result.fields.model_dump(exclude_none=True) == {}
 
 def test_consistent_claim_and_quantity_discrepancy():
     result=verify_claim(claim(),[])
@@ -64,6 +102,42 @@ def test_invalid_upload_rejected():
     c=client.post("/api/claims",headers=h,json={"recycler":"Fictional Demo","facility":"Plant A","material_category":"devices","claimed_quantity":5,"evidence_expected":[]}).json()
     r=client.post(f"/api/claims/{c['id']}/documents",headers=h,data={"document_type":"invoice"},files={"file":("fake.pdf",b"not a pdf","application/pdf")})
     assert r.status_code==415
+
+def test_upload_persists_mocked_gemini_fields(monkeypatch, tmp_path):
+    import io
+    from pypdf import PdfWriter
+    from app.config import settings
+    from app.gemini_extractor import ExtractedDocumentFields, ExtractionResult
+    import app.main as main_module
+
+    monkeypatch.setattr(settings, "storage_provider", "local")
+    monkeypatch.setattr(settings, "upload_dir", str(tmp_path))
+    monkeypatch.setattr(
+        main_module,
+        "extract_document_fields",
+        lambda data, content_type, document_type: ExtractionResult(
+            fields=ExtractedDocumentFields(
+                document_id="INV-99", quantity=25, unit="kg",
+                invoice_reference="INV-99", confidence=0.97
+            ),
+            status="EXTRACTED",
+        ),
+    )
+    suffix=os.urandom(4).hex()
+    client.post("/api/auth/register",json={"name":"Gemini User","user_id":"gemini_"+suffix,"email":"gemini+"+suffix+"@example.com","password":"StrongGeminiPass2026!"})
+    login=client.post("/api/auth/login",json={"user_id":"gemini_"+suffix,"password":"StrongGeminiPass2026!"}).json()
+    token=client.post("/api/auth/verify-otp",json={"challenge_id":login["challenge_id"],"code":login["dev_otp"]}).json()["access_token"]
+    headers={"Authorization":"Bearer "+token}
+    claim_response=client.post("/api/claims",headers=headers,json={"recycler":"Test Recycler","facility":"Plant A","material_category":"devices","claimed_quantity":25,"evidence_expected":[]})
+    pdf=io.BytesIO(); writer=PdfWriter(); writer.add_blank_page(width=72,height=72); writer.write(pdf)
+    uploaded=client.post(
+        f"/api/claims/{claim_response.json()['id']}/documents",
+        headers=headers, data={"document_type":"invoice"},
+        files={"file":("invoice.pdf",pdf.getvalue(),"application/pdf")},
+    )
+    assert uploaded.status_code == 201, uploaded.text
+    assert uploaded.json()["extraction_status"] == "EXTRACTED"
+    assert uploaded.json()["extracted_fields"]["invoice_reference"] == "INV-99"
 
 
 def test_cross_claim_duplicate_identifier():

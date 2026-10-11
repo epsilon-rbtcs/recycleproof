@@ -14,6 +14,7 @@ from .models import Claim, DemoClaim, DemoDocument, DemoFinding, DemoReview, Dem
 from .security import current_demo_session, current_user, hash_password, verify_password, otp_hash, issue_demo_token, issue_token
 from .storage import ALLOWED, extract_pdf, read_file, save_file
 from .verifier import verify_claim
+from .gemini_extractor import apply_extracted_fields, extract_document_fields
 from .demo_data import SCENARIOS
 from .demo_service import demo_claim_out, demo_detail_out, demo_run_out, seed_demo_claims, reset_demo_claims
 from .demo_storage import demo_storage_status, ensure_demo_seed_assets, read_demo_asset
@@ -319,7 +320,13 @@ async def upload_document(claim_id:int,file:UploadFile=File(...),document_type:s
     if document_type not in {"invoice","shipment_manifest","weighbridge_receipt","recycler_permit","recycling_certificate","other"}:raise HTTPException(422,"Invalid document type.")
     data=await file.read(settings.max_upload_bytes+1);provider,key=save_file(data,file.content_type or "",file.filename or "evidence",user.id)
     text,status,confidence=extract_pdf(data) if file.content_type=="application/pdf" else ("","MANUAL_ENTRY_REQUIRED",None)
-    d=Document(claim_id=c.id,owner_id=user.id,document_type=document_type,filename=Path(file.filename or "evidence").name[:255],content_type=file.content_type or "application/octet-stream",size_bytes=len(data),storage_provider=provider,object_key=key,extracted_text=text,extraction_status=status,extraction_confidence=confidence)
+    extracted_fields = {}
+    if file.content_type in ALLOWED:
+        extraction = extract_document_fields(data, file.content_type, document_type)
+        extracted_fields = extraction.fields.model_dump(mode="json", exclude_none=True)
+        status = extraction.status
+        confidence = extraction.fields.confidence
+    d=Document(claim_id=c.id,owner_id=user.id,document_type=document_type,filename=Path(file.filename or "evidence").name[:255],content_type=file.content_type or "application/octet-stream",size_bytes=len(data),storage_provider=provider,object_key=key,extracted_text=text,extracted_fields=extracted_fields,extraction_status=status,extraction_confidence=confidence)
     db.add(d);db.commit();db.refresh(d);return doc_out(d)
 
 @app.get("/api/claims/{claim_id}/documents/{document_id}/download")
@@ -337,7 +344,7 @@ def correct_fields(claim_id:int,document_id:int,body:DocumentFieldsIn,user:User=
 
 @app.post("/api/claims/{claim_id}/verify")
 def run_verification(claim_id:int,user:User=Depends(current_user),db:Session=Depends(get_db)):
-    c=owned_claim(db,claim_id,user);siblings=db.query(Claim).filter(Claim.owner_id==user.id).all();result=verify_claim(c,c.documents,siblings)
+    c=owned_claim(db,claim_id,user);apply_extracted_fields(c,c.documents);siblings=db.query(Claim).filter(Claim.owner_id==user.id).all();result=verify_claim(c,c.documents,siblings)
     run=VerificationRun(claim_id=c.id,status=result["status"],priority_score=result["priority_score"],priority=result["priority"],score_explanation=result["score_explanation"],checks=result["checks"],missing_evidence=result["missing_evidence"],recommended_action=result["recommended_action"])
     db.add(run);db.flush()
     for f in result["findings"]:db.add(Finding(run_id=run.id,**f))

@@ -21,6 +21,9 @@ class Settings:
     s3_bucket: str = os.getenv("S3_BUCKET", "")
     upload_dir: str = os.getenv("LOCAL_UPLOAD_DIR", "./uploads")
     max_upload_bytes: int = int(os.getenv("MAX_UPLOAD_MB", "15")) * 1024 * 1024
+    gemini_api_key: str = os.getenv("GEMINI_API_KEY", "")
+    gemini_model: str = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
+    gemini_timeout_seconds: int = int(os.getenv("GEMINI_TIMEOUT_SECONDS", "30"))
 
     @property
     def smtp_ready(self):
